@@ -14,7 +14,7 @@ import (
 	"github.com/nikandfor/snmp/asn1"
 )
 
-var (
+var ( // errors
 	ErrReadTimeout = errors.New("timeout")
 	ErrExtraData   = errors.New("extra data")
 )
@@ -22,6 +22,7 @@ var (
 type (
 	Command int
 	Version int
+	Type    = asn1.Type
 
 	Var struct {
 		ObjectID asn1.OID
@@ -85,29 +86,52 @@ const ( // Commands
 )
 
 const ( // Types
-	IPAddress  asn1.Type = asn1.Application | 0x0
-	Counter    asn1.Type = asn1.Application | 0x1
-	Gauge      asn1.Type = asn1.Application | 0x2
-	Timeticks  asn1.Type = asn1.Application | 0x3
-	Opaque     asn1.Type = asn1.Application | 0x4
-	Counter64  asn1.Type = asn1.Application | 0x6
-	Float      asn1.Type = asn1.Application | 0x8
-	Double     asn1.Type = asn1.Application | 0x9
-	Integer64  asn1.Type = asn1.Application | 0x10
-	Unsigned64 asn1.Type = asn1.Application | 0x11
+	Boolean     Type = asn1.Universal | 0x1
+	Integer     Type = asn1.Universal | 0x2
+	BitString   Type = asn1.Universal | 0x3
+	OctetString Type = asn1.Universal | 0x4
+	Null        Type = asn1.Universal | 0x5
+	ObjectID    Type = asn1.Universal | 0x6
+	Sequence    Type = asn1.Universal | 0x10
+	TypeSet     Type = asn1.Universal | 0x11
 
-	NoSuchObject   asn1.Type = asn1.Context | asn1.Primitive | 0x0
-	NoSuchInstance asn1.Type = asn1.Context | asn1.Primitive | 0x1
-	EndOfMIBView   asn1.Type = asn1.Context | asn1.Primitive | 0x2
+	IPAddress  Type = asn1.Application | 0x0
+	Counter    Type = asn1.Application | 0x1
+	Gauge      Type = asn1.Application | 0x2
+	Timeticks  Type = asn1.Application | 0x3
+	Opaque     Type = asn1.Application | 0x4
+	Counter64  Type = asn1.Application | 0x6
+	Float      Type = asn1.Application | 0x8
+	Double     Type = asn1.Application | 0x9
+	Integer64  Type = asn1.Application | 0x10
+	Unsigned64 Type = asn1.Application | 0x11
+
+	NoSuchObject   Type = asn1.Context | asn1.Primitive | 0x0
+	NoSuchInstance Type = asn1.Context | asn1.Primitive | 0x1
+	EndOfMIBView   Type = asn1.Context | asn1.Primitive | 0x2
+)
+
+const ( // Error statuses
+	NoError = iota
+	TooBigError
+	NoSuchNameError
+	BadValueError
+	ReadOnlyError
+	GeneralError
 )
 
 func NewClient(conn net.PacketConn) *Client {
 	return &Client{
-		conn:        conn,
-		ReadTimeout: time.Second,
-		reqid:       rand.Int63n(0x100000000),
-		reqs:        make(map[int64]chan Resp),
-		stopc:       make(chan struct{}),
+		conn:           conn,
+		ReadTimeout:    time.Second,
+		Retries:        1,
+		Version:        Version2c,
+		Community:      "public",
+		NonRepeaters:   0,
+		MaxRepetitions: 50,
+		reqid:          rand.Int63n(0x100000000),
+		reqs:           make(map[int64]chan Resp),
+		stopc:          make(chan struct{}),
 	}
 }
 
@@ -119,8 +143,10 @@ func (c *Client) Send(addr net.Addr, p *PDU) error {
 	return err
 }
 
-func (c *Client) Call(addr net.Addr, p *PDU) (*PDU, error) {
-	//	log.Printf("Call %v %+v", addr, p)
+func (c *Client) Call(addr net.Addr, p *PDU) (_ *PDU, err error) {
+	//	defer func() {
+	//		log.Printf("Call %v %+v -> %v", addr, p, err)
+	//	}()
 
 	rc := make(chan Resp, 1)
 
@@ -142,7 +168,7 @@ again:
 		c.mu.Unlock()
 	}()
 
-	err := c.Send(addr, p)
+	err = c.Send(addr, p)
 	if err != nil {
 		return nil, err
 	}
@@ -158,34 +184,75 @@ again:
 func (c *Client) Walk(addr net.Addr, root asn1.OID) (*PDU, error) {
 	var res *PDU
 	obj := root
+	p := &PDU{
+		Version:        c.Version,
+		Community:      c.Community,
+		Command:        GetBulk,
+		NonRepeaters:   c.NonRepeaters,
+		MaxRepetitions: c.MaxRepetitions,
+	}
+
 out:
 	for {
-		p := &PDU{
-			Version:        Version2c,
-			Community:      c.Community,
-			Command:        GetBulk,
-			NonRepeaters:   c.NonRepeaters,
-			MaxRepetitions: c.MaxRepetitions,
-			Vars: []Var{
-				{ObjectID: obj, Type: asn1.Null},
-			},
-		}
+		p.Vars = []Var{{ObjectID: obj, Type: Null}}
 
 		try := 0
 
+	retry:
+		//	log.Printf("try %d/%d", try, c.Retries)
 		resp, err := c.Call(addr, p)
-		if err != nil {
-			if err == ErrReadTimeout && try < c.Retries {
-				try++
-				continue
-			}
-			return nil, err
-		}
-		if resp.ErrorStatus != 0 {
-			return nil, fmt.Errorf("SNMP error: %d/%d", resp.ErrorStatus, resp.ErrorIndex)
-		}
+		//	log.Printf("resp from %-20v: %v err %v", addr, resp, err)
 
-		//	log.Printf("resp: %v", resp)
+		switch {
+		case err == nil && resp.ErrorStatus == NoError:
+			// OK
+		case err == ErrReadTimeout:
+			if try < c.Retries {
+				if try == 0 {
+					if p.MaxRepetitions/2 > 4 {
+						//	log.Printf("shrink repetitions %v <- %v", p.MaxRepetitions/2, p.MaxRepetitions)
+						p.MaxRepetitions /= 2
+					}
+				} else {
+					if p.Version == Version2c {
+						//	log.Printf("downgrade version 1 <- 2c")
+						p.Version = Version1
+						p.Command = GetNext
+					}
+				}
+				try++
+				goto retry
+			}
+
+			fallthrough
+		case err != nil:
+			return nil, err
+		case resp.ErrorStatus == NoSuchNameError:
+			if len(resp.Vars) > 1 {
+				log.Printf("some vars are probably lost\n%v", resp.Dump())
+			}
+
+			if res == nil {
+				res = resp
+				res.Vars = nil
+			}
+			break out
+		case resp.ErrorStatus == TooBigError:
+			if p.MaxRepetitions/2 > 4 {
+				//	log.Printf("shrink repetitions %v <- %v", p.MaxRepetitions/2, p.MaxRepetitions)
+				p.MaxRepetitions /= 2
+				continue out
+			} else if p.Version == Version2c {
+				//	log.Printf("downgrade version 1 <- 2c")
+				p.Version = Version1
+				p.Command = GetNext
+				continue out
+			}
+
+			fallthrough
+		default:
+			return nil, fmt.Errorf("SNMP error: %d (%d)", resp.ErrorStatus, resp.ErrorIndex)
+		}
 
 		if res == nil {
 			cp := *resp
@@ -220,9 +287,19 @@ out:
 func (c *Client) Run() {
 	buf := make([]byte, 0x10000)
 	for {
+		c.conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
+
 		n, addr, err := c.conn.ReadFrom(buf[:])
+		select {
+		case <-c.stopc:
+			return
+		default:
+		}
 		if err != nil {
-			log.Printf("conn.Read: %v", err)
+			if e, ok := err.(net.Error); ok && e.Timeout() {
+				continue
+			}
+			log.Printf("conn.Read: %v %v", err, err)
 			continue
 		}
 
@@ -233,7 +310,7 @@ func (c *Client) Run() {
 		rc := c.reqs[p.ReqID]
 		c.mu.Unlock()
 
-		//	log.Printf("Read packet from %v id %x err-st %d vars %d err %v bytes %d", addr, p.ReqID, p.ErrorStatus, len(p.Vars), err, n)
+		//	log.Printf("Read packet ver %v from %v id %x err-st %d vars %d err %v bytes %d", p.Version, addr, p.ReqID, p.ErrorStatus, len(p.Vars), err, n)
 
 		if rc == nil {
 			continue
@@ -249,6 +326,11 @@ func (c *Client) Run() {
 			log.Printf("packet dropped: from %20v, id %8x, err %v", addr, p.ReqID, err)
 		}
 	}
+}
+
+func (c *Client) Close() error {
+	close(c.stopc)
+	return c.conn.Close()
 }
 
 func (p *PDU) EncodeTo(b []byte) []byte {
@@ -378,6 +460,8 @@ func (v *Var) Decode(b []byte) ([]byte, error) {
 			var r []byte
 			b, v.Type, r = asn1.ParseRaw(b)
 			v.Value = net.IP(r)
+		case Null:
+			b, v.Type, _ = asn1.ParseRaw(b)
 		default:
 			b, v.Type, v.Value = asn1.ParseRaw(b)
 		}
@@ -395,11 +479,24 @@ func (p *PDU) String() string {
 	default:
 		fmt.Fprintf(&b, "err-status %d err-index %d", p.ErrorStatus, p.ErrorIndex)
 	}
-	fmt.Fprintf(&b, " vars %d\n", len(p.Vars))
+	fmt.Fprintf(&b, " vars %d", len(p.Vars))
+	//	b.WriteByte('\n')
 	//	for _, v := range p.Vars {
 	//		b.WriteString(v.String())
 	//		b.WriteByte('\n')
 	//	}
+
+	return b.String()
+}
+
+func (p *PDU) Dump() string {
+	var b strings.Builder
+	b.WriteString(p.String())
+	b.WriteByte('\n')
+	for _, v := range p.Vars {
+		b.WriteString(v.String())
+		b.WriteByte('\n')
+	}
 
 	return b.String()
 }
