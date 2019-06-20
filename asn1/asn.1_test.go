@@ -13,7 +13,7 @@ func TestSequence(t *testing.T) {
 	assert.Equal(t, []byte{0x30, 3, 2, 1, 5}, b)
 
 	inside := false
-	ParseSequence(b, func(tp Type, b []byte) error {
+	b, err := ParseSequence(b, func(tp Type, b []byte) error {
 		assert.Equal(t, Type(0x30), tp)
 		b, itp, v := ParseInt(b)
 		assert.Empty(t, b)
@@ -25,6 +25,8 @@ func TestSequence(t *testing.T) {
 		return nil
 	})
 
+	assert.NoError(t, err)
+	assert.Empty(t, b)
 	assert.True(t, inside)
 }
 

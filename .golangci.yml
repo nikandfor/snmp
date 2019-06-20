@@ -18,6 +18,8 @@ linters-settings:
     list-type: whitelist
     packages:
       - github.com/stretchr/testify/assert
+      - github.com/nikandfor/snmp/asn1
+      - github.com/nikandfor/snmp
   misspell:
     locale: US
   lll:

@@ -91,7 +91,7 @@ func BuildInt64(b []byte, tp Type, v int64) []byte {
 
 	b = append(b, byte(tp), byte(sz))
 	for i := sz - 1; i >= 0; i-- {
-		b = append(b, byte(v>>(uint)(8*i)))
+		b = append(b, byte(v>>uint(8*i)))
 	}
 	return b
 }

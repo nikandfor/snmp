@@ -48,14 +48,9 @@ func main() {
 	c.Retries = *retries
 	c.NonRepeaters = *nonreps
 	c.MaxRepetitions = *maxreps
-
-	switch *version {
-	case "1":
-		c.Version = snmp.Version1
-	case "2c":
-		c.Version = snmp.Version2c
-	default:
-		log.Fatalf("unsupported version: %v", *version)
+	c.Version, err = snmp.ParseVersion(*version)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	go c.Run()

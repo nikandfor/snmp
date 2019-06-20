@@ -47,6 +47,8 @@ type (
 	Client struct {
 		conn net.PacketConn
 
+		Receive chan<- Packet
+
 		ReadTimeout time.Duration
 		Retries     int
 
@@ -58,12 +60,12 @@ type (
 
 		mu    sync.Mutex
 		reqid int64
-		reqs  map[int64]chan Resp
+		reqs  map[int64]chan Packet
 
 		stopc chan struct{}
 	}
 
-	Resp struct {
+	Packet struct {
 		Addr net.Addr
 		PDU  *PDU
 		Err  error
@@ -130,7 +132,7 @@ func NewClient(conn net.PacketConn) *Client {
 		NonRepeaters:   0,
 		MaxRepetitions: 50,
 		reqid:          rand.Int63n(0x100000000),
-		reqs:           make(map[int64]chan Resp),
+		reqs:           make(map[int64]chan Packet),
 		stopc:          make(chan struct{}),
 	}
 }
@@ -143,12 +145,34 @@ func (c *Client) Send(addr net.Addr, p *PDU) error {
 	return err
 }
 
+func (c *Client) Read(buf []byte, p *PDU) (net.Addr, *PDU, error) {
+	if buf == nil {
+		buf = make([]byte, 0x4000)
+	}
+
+	err := c.conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
+	if err != nil {
+		return nil, nil, err
+	}
+	n, addr, err := c.conn.ReadFrom(buf)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if p == nil {
+		p = new(PDU)
+	}
+	err = p.Decode(buf[:n])
+
+	return addr, p, err
+}
+
 func (c *Client) Call(addr net.Addr, p *PDU) (_ *PDU, err error) {
 	//	defer func() {
 	//		log.Printf("Call %v %+v -> %v", addr, p, err)
 	//	}()
 
-	rc := make(chan Resp, 1)
+	rc := make(chan Packet, 1)
 
 	c.mu.Lock()
 again:
@@ -265,8 +289,7 @@ out:
 		}
 
 		for _, v := range resp.Vars {
-			switch v.Type {
-			case EndOfMIBView:
+			if v.Type == EndOfMIBView {
 				break out
 			}
 
@@ -287,9 +310,12 @@ out:
 func (c *Client) Run() {
 	buf := make([]byte, 0x10000)
 	for {
-		c.conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
+		err := c.conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
+		if err != nil {
+			log.Printf("SetDeadline: %v", err)
+		}
 
-		n, addr, err := c.conn.ReadFrom(buf[:])
+		n, addr, err := c.conn.ReadFrom(buf)
 		select {
 		case <-c.stopc:
 			return
@@ -313,11 +339,16 @@ func (c *Client) Run() {
 		//	log.Printf("Read packet ver %v from %v id %x err-st %d vars %d err %v bytes %d", p.Version, addr, p.ReqID, p.ErrorStatus, len(p.Vars), err, n)
 
 		if rc == nil {
+			select {
+			case c.Receive <- Packet{Addr: addr, PDU: p, Err: err}:
+			default:
+			}
+
 			continue
 		}
 
 		select {
-		case rc <- Resp{
+		case rc <- Packet{
 			Addr: addr,
 			PDU:  p,
 			Err:  err,
@@ -335,7 +366,7 @@ func (c *Client) Close() error {
 
 func (p *PDU) EncodeTo(b []byte) []byte {
 	return asn1.BuildSequence(b, asn1.Sequence|asn1.Constructor, func(b []byte) []byte {
-		b = asn1.BuildInt(b, asn1.Universal|asn1.Primitive|asn1.Integer, (int)(p.Version))
+		b = asn1.BuildInt(b, asn1.Universal|asn1.Primitive|asn1.Integer, int(p.Version))
 		b = asn1.BuildString(b, asn1.Universal|asn1.Primitive|asn1.OctetString, p.Community)
 
 		b = asn1.BuildSequence(b, asn1.Type(p.Command), func(b []byte) []byte {
@@ -466,6 +497,10 @@ func (v *Var) Decode(b []byte) ([]byte, error) {
 			b, v.Type, v.Value = asn1.ParseRaw(b)
 		}
 
+		if len(b) != 0 {
+			return ErrExtraData
+		}
+
 		return nil
 	})
 }
@@ -523,7 +558,7 @@ func (v Version) String() string {
 	case Version3:
 		return "3"
 	default:
-		return fmt.Sprintf("%d", (int)(v))
+		return fmt.Sprintf("%d", int(v))
 	}
 }
 
@@ -550,4 +585,17 @@ func TypeString(t asn1.Type) string {
 		return v
 	}
 	return fmt.Sprintf("Type[%x]", int(t))
+}
+
+func ParseVersion(s string) (Version, error) {
+	switch s {
+	case "1":
+		return Version1, nil
+	case "2c":
+		return Version2c, nil
+	case "3":
+		return Version3, nil
+	default:
+		return 0, errors.New("unsupported version")
+	}
 }
