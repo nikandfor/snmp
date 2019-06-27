@@ -11,18 +11,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/beorn7/perks/quantile"
 	"github.com/nikandfor/snmp/asn1"
 )
 
 var ( // errors
 	ErrReadTimeout = errors.New("timeout")
 	ErrExtraData   = errors.New("extra data")
+	ErrClosed      = errors.New("closed client")
 )
 
 type (
-	Command int
-	Version int
 	Type    = asn1.Type
+	Command = Type
+	Version int
 
 	Var struct {
 		ObjectID asn1.OID
@@ -35,7 +37,7 @@ type (
 		Community string
 
 		Command Command
-		ReqID   int64
+		ReqID   int32
 
 		NonRepeaters, MaxRepetitions int
 
@@ -59,8 +61,8 @@ type (
 		MaxRepetitions int
 
 		mu    sync.Mutex
-		reqid int64
-		reqs  map[int64]chan Packet
+		reqid int32
+		reqs  map[int32]chan Packet
 
 		stopc chan struct{}
 	}
@@ -69,6 +71,12 @@ type (
 		Addr net.Addr
 		PDU  *PDU
 		Err  error
+	}
+
+	Telemetry struct {
+		Requests *quantile.Stream
+		Duration time.Duration
+		Errors   int
 	}
 )
 
@@ -122,6 +130,12 @@ const ( // Error statuses
 	GeneralError
 )
 
+func NewTelemetry() *Telemetry {
+	return &Telemetry{
+		Requests: quantile.NewHighBiased((time.Millisecond / 10).Seconds()),
+	}
+}
+
 func NewClient(conn net.PacketConn) *Client {
 	return &Client{
 		conn:           conn,
@@ -131,8 +145,8 @@ func NewClient(conn net.PacketConn) *Client {
 		Community:      "public",
 		NonRepeaters:   0,
 		MaxRepetitions: 50,
-		reqid:          rand.Int63n(0x100000000),
-		reqs:           make(map[int64]chan Packet),
+		reqid:          rand.Int31n(0x1000000),
+		reqs:           make(map[int32]chan Packet),
 		stopc:          make(chan struct{}),
 	}
 }
@@ -205,9 +219,7 @@ again:
 	}
 }
 
-func (c *Client) Walk(addr net.Addr, root asn1.OID) (*PDU, error) {
-	var res *PDU
-	obj := root
+func (c *Client) Walk(addr net.Addr, root asn1.OID, args ...interface{}) (*PDU, error) {
 	p := &PDU{
 		Version:        c.Version,
 		Community:      c.Community,
@@ -216,72 +228,82 @@ func (c *Client) Walk(addr net.Addr, root asn1.OID) (*PDU, error) {
 		MaxRepetitions: c.MaxRepetitions,
 	}
 
+	var t *Telemetry
+	var start time.Time
+	for _, a := range args {
+		switch a := a.(type) {
+		case nil:
+		case *PDU:
+			p = a
+		case Version:
+			p.Version = a
+		case Command:
+			p.Command = a
+		case *Telemetry:
+			t = a
+			start = time.Now()
+		}
+	}
+
+	var vars []Var
+
+	var err error
+	var resp *PDU
+	obj := root
+	try := 0
 out:
 	for {
-		p.Vars = []Var{{ObjectID: obj, Type: Null}}
+		if cap(p.Vars) == 0 {
+			p.Vars = []Var{{ObjectID: obj, Type: asn1.Null}}
+		} else {
+			p.Vars = p.Vars[:1]
+			p.Vars[0] = Var{ObjectID: obj, Type: asn1.Null}
+		}
 
-		try := 0
+		var st time.Time
+		if t != nil {
+			st = time.Now()
+		}
 
-	retry:
-		//	log.Printf("try %d/%d", try, c.Retries)
-		resp, err := c.Call(addr, p)
-		//	log.Printf("resp from %-20v: %v err %v", addr, resp, err)
+		resp, err = c.Call(addr, p)
+
+		if t != nil {
+			t.Requests.Insert(time.Since(st).Seconds())
+			if err != nil || resp.ErrorStatus != 0 {
+				t.Errors++
+			}
+		}
 
 		switch {
-		case err == nil && resp.ErrorStatus == NoError:
-			// OK
+		case err == nil && resp.ErrorStatus == 0:
+			// ok
 		case err == ErrReadTimeout:
-			if try < c.Retries {
-				if try == 0 {
-					if p.MaxRepetitions/2 > 4 {
-						//	log.Printf("shrink repetitions %v <- %v", p.MaxRepetitions/2, p.MaxRepetitions)
-						p.MaxRepetitions /= 2
-					}
-				} else {
-					if p.Version == Version2c {
-						//	log.Printf("downgrade version 1 <- 2c")
-						p.Version = Version1
-						p.Command = GetNext
-					}
-				}
-				try++
-				goto retry
+			if try >= c.Retries {
+				break out
 			}
 
-			fallthrough
+			if try < c.Retries/2 && p.MaxRepetitions > 4 {
+				p.MaxRepetitions /= 2
+			} else if p.Version == Version2c {
+				p.Version = Version1
+				p.Command = GetNext
+			}
+
+			try++
+			continue
 		case err != nil:
-			return nil, err
+			break out
 		case resp.ErrorStatus == NoSuchNameError:
 			if len(resp.Vars) > 1 {
 				log.Printf("some vars are probably lost\n%v", resp.Dump())
 			}
-
-			if res == nil {
-				res = resp
-				res.Vars = nil
-			}
 			break out
-		case resp.ErrorStatus == TooBigError:
-			if p.MaxRepetitions/2 > 4 {
-				//	log.Printf("shrink repetitions %v <- %v", p.MaxRepetitions/2, p.MaxRepetitions)
-				p.MaxRepetitions /= 2
-				continue out
-			} else if p.Version == Version2c {
-				//	log.Printf("downgrade version 1 <- 2c")
-				p.Version = Version1
-				p.Command = GetNext
-				continue out
-			}
-
-			fallthrough
+		case resp.ErrorStatus == TooBigError && p.MaxRepetitions > 1:
+			p.MaxRepetitions /= 2
+			continue
 		default:
-			return nil, fmt.Errorf("SNMP error: %d (%d)", resp.ErrorStatus, resp.ErrorIndex)
-		}
-
-		if res == nil {
-			cp := *resp
-			res = &cp
-			res.Vars = nil
+			err = fmt.Errorf("SNMP error: %d (%d)", resp.ErrorStatus, resp.ErrorIndex)
+			break out
 		}
 
 		if len(resp.Vars) == 0 {
@@ -297,14 +319,34 @@ out:
 				break out
 			}
 
-			res.Vars = append(res.Vars, v)
+			vars = append(vars, v)
 		}
 
 		last := resp.Vars[len(resp.Vars)-1]
 		obj = last.ObjectID
+		try = 0
 	}
 
-	return res, nil
+	if t != nil {
+		t.Duration = time.Since(start)
+	}
+
+	if err != nil {
+		if resp == nil {
+			resp = p
+			resp.Vars = nil
+		}
+		resp.Vars = append(vars, resp.Vars...)
+		resp.NonRepeaters = p.NonRepeaters
+		resp.MaxRepetitions = p.MaxRepetitions
+		return resp, err
+	}
+
+	resp.Vars = vars
+	resp.NonRepeaters = p.NonRepeaters
+	resp.MaxRepetitions = p.MaxRepetitions
+
+	return resp, nil
 }
 
 func (c *Client) Run() {
@@ -318,6 +360,7 @@ func (c *Client) Run() {
 		n, addr, err := c.conn.ReadFrom(buf)
 		select {
 		case <-c.stopc:
+			c.closeAllRequests(err)
 			return
 		default:
 		}
@@ -359,6 +402,17 @@ func (c *Client) Run() {
 	}
 }
 
+func (c *Client) closeAllRequests(err error) {
+	if err == nil {
+		err = ErrClosed
+	}
+	c.mu.Lock()
+	for _, rc := range c.reqs {
+		rc <- Packet{Err: err}
+	}
+	c.mu.Unlock()
+}
+
 func (c *Client) Close() error {
 	close(c.stopc)
 	return c.conn.Close()
@@ -370,7 +424,7 @@ func (p *PDU) EncodeTo(b []byte) []byte {
 		b = asn1.BuildString(b, asn1.Universal|asn1.Primitive|asn1.OctetString, p.Community)
 
 		b = asn1.BuildSequence(b, asn1.Type(p.Command), func(b []byte) []byte {
-			b = asn1.BuildInt64(b, asn1.Universal|asn1.Primitive|asn1.Integer, p.ReqID)
+			b = asn1.BuildInt32(b, asn1.Universal|asn1.Primitive|asn1.Integer, p.ReqID)
 
 			switch p.Command {
 			case GetBulk:
@@ -402,7 +456,7 @@ func (p *PDU) Decode(b []byte) (err error) {
 		b, err = asn1.ParseSequence(b, func(tp asn1.Type, b []byte) (err error) {
 			p.Command = Command(tp)
 
-			b, _, p.ReqID = asn1.ParseInt64(b)
+			b, _, p.ReqID = asn1.ParseInt32(b)
 
 			switch p.Command {
 			case GetBulk:
@@ -507,7 +561,7 @@ func (v *Var) Decode(b []byte) ([]byte, error) {
 
 func (p *PDU) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "ver %2v community %v cmd %v reqid %x ", p.Version, p.Community, p.Command, p.ReqID)
+	fmt.Fprintf(&b, "ver %2v community %v cmd %v reqid %x ", p.Version, p.Community, CommandString(p.Command), p.ReqID)
 	switch p.Command {
 	case GetBulk:
 		fmt.Fprintf(&b, "non-rep %d max-rep %d", p.NonRepeaters, p.MaxRepetitions)
@@ -562,7 +616,7 @@ func (v Version) String() string {
 	}
 }
 
-func TypeString(t asn1.Type) string {
+func TypeString(t Type) string {
 	if t&0xc0 == 0 {
 		return t.String()
 	}
@@ -585,6 +639,21 @@ func TypeString(t asn1.Type) string {
 		return v
 	}
 	return fmt.Sprintf("Type[%x]", int(t))
+}
+
+func CommandString(t Command) string {
+	v, ok := map[asn1.Type]string{
+		Get:      "Get",
+		GetNext:  "GetNext",
+		Response: "Response",
+		Set:      "Set",
+		Trap:     "Trap",
+		GetBulk:  "GetBulk",
+	}[t]
+	if ok {
+		return v
+	}
+	return fmt.Sprintf("Command[%x]", int(t))
 }
 
 func ParseVersion(s string) (Version, error) {

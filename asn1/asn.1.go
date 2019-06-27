@@ -96,6 +96,23 @@ func BuildInt64(b []byte, tp Type, v int64) []byte {
 	return b
 }
 
+func BuildInt32(b []byte, tp Type, v int32) []byte {
+	var sz int
+	var q int32 = 0xff
+	for sz = 1; sz <= 8; sz++ {
+		if (v & ^q) == 0 {
+			break
+		}
+		q = q<<8 | 0xff
+	}
+
+	b = append(b, byte(tp), byte(sz))
+	for i := sz - 1; i >= 0; i-- {
+		b = append(b, byte(v>>uint(8*i)))
+	}
+	return b
+}
+
 func BuildInt(b []byte, tp Type, v int) []byte { return BuildInt64(b, tp, int64(v)) }
 
 func BuildString(b []byte, tp Type, s string) []byte {
@@ -220,6 +237,19 @@ func ParseInt64(b []byte) ([]byte, Type, int64) {
 	for i := 0; i < n; i++ {
 		v <<= 8
 		v |= int64(b[2+i])
+	}
+
+	return b[2+n:], tp, v
+}
+
+func ParseInt32(b []byte) ([]byte, Type, int32) {
+	tp := Type(b[0])
+	n := int(b[1])
+	v := int32(0)
+
+	for i := 0; i < n; i++ {
+		v <<= 8
+		v |= int32(b[2+i])
 	}
 
 	return b[2+n:], tp, v

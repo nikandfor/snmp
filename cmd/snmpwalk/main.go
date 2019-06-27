@@ -16,13 +16,14 @@ import (
 var (
 	listen    = flag.String("listen", "", "addr to listen to")
 	addr      = flag.String("addr", "", "addr to send request to")
-	debug     = flag.String("http", "", "debug address to listen to")
+	debug     = flag.String("debug", "", "debug http address to listen to")
 	community = flag.String("community", "public", "SNMP Community")
 	timeout   = flag.Duration("read-timeout", time.Second, "read timeout for each request")
 	retries   = flag.Int("retries", 1, "SNMP request retries")
 	nonreps   = flag.Int("non-repeaters", 0, "GetBulk argument")
 	maxreps   = flag.Int("max-repetitions", 100, "GetBulk argument")
 	version   = flag.String("version", "2c", "SNMP protocol version")
+	telemetry = flag.Bool("telemetry", true, "Print request telemetry")
 )
 
 func main() {
@@ -58,17 +59,37 @@ func main() {
 	a := ParseAddr(*addr)
 	//	log.Printf("addr: %v", a)
 
+	var t *snmp.Telemetry
+	if *telemetry {
+		t = snmp.NewTelemetry()
+	}
+
 	for _, arg := range flag.Args() {
 		root := asn1.ParseOID(arg)
 
-		p, err := c.Walk(a, root)
-		if err != nil {
-			log.Fatalf("walk: %v", err)
+		p, err := c.Walk(a, root, t)
+		for _, v := range p.Vars {
+			fmt.Printf("%v\n", v)
 		}
 
-		for _, v := range p.Vars {
-			fmt.Printf("  %v\n", v)
+		if t != nil {
+			log.Printf("vars: %v, version used: %v, repetitions: %d, %d", len(p.Vars), p.Version, p.NonRepeaters, p.MaxRepetitions)
 		}
+
+		if err != nil {
+			log.Printf("walk: %v", err)
+			break
+		}
+	}
+
+	if t != nil {
+		q0 := t.Requests.Query(0) * 1000
+		q5 := t.Requests.Query(0.5) * 1000
+		q9 := t.Requests.Query(0.9) * 1000
+		q99 := t.Requests.Query(0.99) * 1000
+		q1 := t.Requests.Query(1) * 1000
+		rps := float64(t.Requests.Count()) / t.Duration.Seconds()
+		log.Printf("%d (%d errors) requests made in %.1f secs: %.1f rps, quantiles ms: .0 %.1f, .5 %.1f, .9 %.1f, .99 %.1f, 1. %.1f", t.Requests.Count(), t.Errors, t.Duration.Seconds(), rps, q0, q5, q9, q99, q1)
 	}
 }
 
