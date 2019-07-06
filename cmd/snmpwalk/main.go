@@ -51,7 +51,8 @@ func main() {
 	c.MaxRepetitions = *maxreps
 	c.Version, err = snmp.ParseVersion(*version)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("version: %v", err)
+		return
 	}
 
 	go c.Run()
@@ -89,7 +90,8 @@ func main() {
 		q99 := t.Requests.Query(0.99) * 1000
 		q1 := t.Requests.Query(1) * 1000
 		rps := float64(t.Requests.Count()) / t.Duration.Seconds()
-		log.Printf("%d (%d errors) requests made in %.1f secs: %.1f rps, quantiles ms: .0 %.1f, .5 %.1f, .9 %.1f, .99 %.1f, 1. %.1f", t.Requests.Count(), t.Errors, t.Duration.Seconds(), rps, q0, q5, q9, q99, q1)
+		log.Printf("%d (%d errors) requests made in %.1f secs: %.1f rps, quantiles ms: .0 %.1f, .5 %.1f, .9 %.1f, .99 %.1f, 1. %.1f",
+			t.Requests.Count(), t.Errors, t.Duration.Seconds(), rps, q0, q5, q9, q99, q1)
 	}
 }
 

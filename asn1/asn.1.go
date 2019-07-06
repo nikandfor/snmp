@@ -9,8 +9,10 @@ import (
 )
 
 type (
+	// Type is an ASN.1 type
 	Type int
 
+	// OID is as ASN.1 Object ID
 	OID []int
 )
 
@@ -43,6 +45,7 @@ const (
 	LongLen = 0x80
 )
 
+// BuildLength writes header and inserts length when data is written
 func BuildLength(b []byte, cb func(b []byte) []byte) []byte {
 	b = append(b, 0)
 	st := len(b)
@@ -74,11 +77,13 @@ func BuildLength(b []byte, cb func(b []byte) []byte) []byte {
 	return b
 }
 
+// BuildSequence writes ASN.1 sequence record
 func BuildSequence(b []byte, tp Type, cb func([]byte) []byte) []byte {
 	b = append(b, byte(tp))
 	return BuildLength(b, cb)
 }
 
+// BuildInt64 writes ASN.1 integer type. The only difference between BuildInt* functions is argument type so that you may not cast
 func BuildInt64(b []byte, tp Type, v int64) []byte {
 	var sz int
 	var q int64 = 0xff
@@ -96,6 +101,7 @@ func BuildInt64(b []byte, tp Type, v int64) []byte {
 	return b
 }
 
+// BuildInt32 writes ASN.1 integer type. The only difference between BuildInt* functions is argument type so that you may not cast
 func BuildInt32(b []byte, tp Type, v int32) []byte {
 	var sz int
 	var q int32 = 0xff
@@ -113,8 +119,10 @@ func BuildInt32(b []byte, tp Type, v int32) []byte {
 	return b
 }
 
+// BuildInt writes ASN.1 integer type. The only difference between BuildInt* functions is argument type so that you may not cast
 func BuildInt(b []byte, tp Type, v int) []byte { return BuildInt64(b, tp, int64(v)) }
 
+// BuildString writes ASN.1 string type
 func BuildString(b []byte, tp Type, s string) []byte {
 	b = append(b, byte(tp))
 	l := len(s)
@@ -132,6 +140,7 @@ func BuildString(b []byte, tp Type, s string) []byte {
 	return b
 }
 
+// BuildObjectID writes ASN.1 Object ID
 func BuildObjectID(b []byte, tp Type, id OID) []byte {
 	// first two bytes encoded as byte(id[0] * 40 + id[1])
 	l := 1
@@ -189,14 +198,19 @@ func BuildObjectID(b []byte, tp Type, id OID) []byte {
 	return b
 }
 
+// BuildNull writes ASN.1 Null value
 func BuildNull(b []byte, tp Type) []byte { return append(b, byte(tp), 0) }
 
+// ParseHeader parses ASN.1 header: type and length.
+// It returns (rest of buffer, type, record length).
 func ParseHeader(b []byte) ([]byte, Type, int) {
 	tp := Type(b[0])
 	b, l := ParseLength(b[1:])
 	return b, tp, l
 }
 
+// ParseLength parses ANS.1 length.
+// It returns (rest of buffer, record length).
 func ParseLength(b []byte) ([]byte, int) {
 	if len(b) == 0 {
 		return nil, 0
@@ -216,12 +230,17 @@ func ParseLength(b []byte) ([]byte, int) {
 	return b[1+n:], l
 }
 
+// ParseSequence parses ANS.1 sequence record.
+// Type and length are parsed by function, record body is passed to callback.
+// It returns (rest of buffer, error from callback).
 func ParseSequence(b []byte, cb func(tp Type, b []byte) error) ([]byte, error) {
 	b, tp, l := ParseHeader(b)
 	err := cb(tp, b[:l])
 	return b[l:], err
 }
 
+// ParseRaw parses any ANS.1 record.
+// It returns (rest of buffer, type, record body).
 func ParseRaw(b []byte) ([]byte, Type, []byte) {
 	tp := Type(b[0])
 	b, l := ParseLength(b[1:])
@@ -229,6 +248,9 @@ func ParseRaw(b []byte) ([]byte, Type, []byte) {
 	return b[l:], tp, res
 }
 
+// ParseInt64 parses ANS.1 integer record.
+// The only difference between all ParseInt* functions is the result type.
+// It returns (rest of buffer, type, int value).
 func ParseInt64(b []byte) ([]byte, Type, int64) {
 	tp := Type(b[0])
 	n := int(b[1])
@@ -242,6 +264,9 @@ func ParseInt64(b []byte) ([]byte, Type, int64) {
 	return b[2+n:], tp, v
 }
 
+// ParseInt32 parses ANS.1 integer record.
+// The only difference between all ParseInt* functions is the result type.
+// It returns (rest of buffer, type, int value).
 func ParseInt32(b []byte) ([]byte, Type, int32) {
 	tp := Type(b[0])
 	n := int(b[1])
@@ -255,11 +280,16 @@ func ParseInt32(b []byte) ([]byte, Type, int32) {
 	return b[2+n:], tp, v
 }
 
+// ParseInt parses ANS.1 integer record.
+// The only difference between all ParseInt* functions is the result type.
+// It returns (rest of buffer, type, int value).
 func ParseInt(b []byte) ([]byte, Type, int) {
 	b, tp, v := ParseInt64(b)
 	return b, tp, int(v)
 }
 
+// ParseInt parses ANS.1 string record.
+// It returns (rest of buffer, type, int value).
 func ParseString(b []byte) ([]byte, Type, string) {
 	tp := Type(b[0])
 	var l int
@@ -268,6 +298,8 @@ func ParseString(b []byte) ([]byte, Type, string) {
 	return b[l:], tp, v
 }
 
+// ParseObjectID parses ANS.1 object ID.
+// It returns (rest of buffer, type, OID).
 func ParseObjectID(b []byte) ([]byte, Type, OID) {
 	tp := Type(b[0])
 	var l int
@@ -288,6 +320,7 @@ func ParseObjectID(b []byte) ([]byte, Type, OID) {
 	return b[l:], tp, v
 }
 
+// String formats Object ID as 1.3.6.1
 func (o OID) String() string {
 	var b bytes.Buffer
 	for i, d := range o {
@@ -299,6 +332,7 @@ func (o OID) String() string {
 	return b.String()
 }
 
+// HasPrefix checks if receiver is a parent Object ID of an argument
 func (o OID) HasPrefix(p OID) bool {
 	if len(o) < len(p) {
 		return false
@@ -312,6 +346,7 @@ func (o OID) HasPrefix(p OID) bool {
 	return true
 }
 
+// ParseOID parses Object ID in format 1.3.6.1.2.1
 func ParseOID(s string) OID {
 	if s == "" {
 		return OID{}

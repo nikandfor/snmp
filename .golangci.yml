@@ -20,6 +20,7 @@ linters-settings:
       - github.com/stretchr/testify/assert
       - github.com/nikandfor/snmp/asn1
       - github.com/nikandfor/snmp
+      - github.com/beorn7/perks/quantile
   misspell:
     locale: US
   lll:

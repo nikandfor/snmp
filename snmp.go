@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/beorn7/perks/quantile"
+
 	"github.com/nikandfor/snmp/asn1"
 )
 
@@ -130,12 +131,14 @@ const ( // Error statuses
 	GeneralError
 )
 
+// NewTelemetry returns inited telemetry object
 func NewTelemetry() *Telemetry {
 	return &Telemetry{
 		Requests: quantile.NewHighBiased((time.Millisecond / 10).Seconds()),
 	}
 }
 
+// NewClient creates SNMP client with default options
 func NewClient(conn net.PacketConn) *Client {
 	return &Client{
 		conn:           conn,
@@ -151,6 +154,7 @@ func NewClient(conn net.PacketConn) *Client {
 	}
 }
 
+// Send sends Protocol Data Unit to addr
 func (c *Client) Send(addr net.Addr, p *PDU) error {
 	b := p.EncodeTo(nil)
 
@@ -159,6 +163,7 @@ func (c *Client) Send(addr net.Addr, p *PDU) error {
 	return err
 }
 
+// Read reads Protocol Data Unit from connection
 func (c *Client) Read(buf []byte, p *PDU) (net.Addr, *PDU, error) {
 	if buf == nil {
 		buf = make([]byte, 0x4000)
@@ -181,6 +186,7 @@ func (c *Client) Read(buf []byte, p *PDU) (net.Addr, *PDU, error) {
 	return addr, p, err
 }
 
+// Call sends Protocol Data Unit to address and waits for response for c.ReadTimeout
 func (c *Client) Call(addr net.Addr, p *PDU) (_ *PDU, err error) {
 	//	defer func() {
 	//		log.Printf("Call %v %+v -> %v", addr, p, err)
@@ -219,6 +225,13 @@ again:
 	}
 }
 
+// Walk scans addr for variables with prefix root.
+// It retries on fail and downgrade protocol version if no answer.
+// Additional arguments are supported:
+//     *PDU - use that pdu instead of default
+//     Version - set protocol version
+//     Command - set command
+//     *Telemetry - collect telemetry of requests
 func (c *Client) Walk(addr net.Addr, root asn1.OID, args ...interface{}) (*PDU, error) {
 	p := &PDU{
 		Version:        c.Version,
@@ -349,6 +362,8 @@ out:
 	return resp, nil
 }
 
+// Run does background tasks reqiured for work.
+// It's blocked until Client Closed
 func (c *Client) Run() {
 	buf := make([]byte, 0x10000)
 	for {
@@ -413,17 +428,20 @@ func (c *Client) closeAllRequests(err error) {
 	c.mu.Unlock()
 }
 
+// Close stops Run and closes connection
 func (c *Client) Close() error {
 	close(c.stopc)
 	return c.conn.Close()
 }
 
+// EncodeTo encodes Protocol Data Unit to buffer.
+// If buffer is nil or not big enough new buffer is allocated.
 func (p *PDU) EncodeTo(b []byte) []byte {
 	return asn1.BuildSequence(b, asn1.Sequence|asn1.Constructor, func(b []byte) []byte {
 		b = asn1.BuildInt(b, asn1.Universal|asn1.Primitive|asn1.Integer, int(p.Version))
 		b = asn1.BuildString(b, asn1.Universal|asn1.Primitive|asn1.OctetString, p.Community)
 
-		b = asn1.BuildSequence(b, asn1.Type(p.Command), func(b []byte) []byte {
+		b = asn1.BuildSequence(b, p.Command, func(b []byte) []byte {
 			b = asn1.BuildInt32(b, asn1.Universal|asn1.Primitive|asn1.Integer, p.ReqID)
 
 			switch p.Command {
@@ -447,6 +465,7 @@ func (p *PDU) EncodeTo(b []byte) []byte {
 	})
 }
 
+// Decode decodes Protocol Data Unit from the buffer
 func (p *PDU) Decode(b []byte) (err error) {
 	b, err = asn1.ParseSequence(b, func(tp asn1.Type, b []byte) (err error) {
 		b, _, v := asn1.ParseInt(b)
@@ -454,7 +473,7 @@ func (p *PDU) Decode(b []byte) (err error) {
 		b, _, p.Community = asn1.ParseString(b)
 
 		b, err = asn1.ParseSequence(b, func(tp asn1.Type, b []byte) (err error) {
-			p.Command = Command(tp)
+			p.Command = tp
 
 			b, _, p.ReqID = asn1.ParseInt32(b)
 
@@ -506,6 +525,8 @@ func (p *PDU) Decode(b []byte) (err error) {
 	return nil
 }
 
+// EncodeTo encodes Variable to buffer.
+// If buffer is nil or not big enough new buffer is allocated.
 func (v *Var) EncodeTo(b []byte) []byte {
 	return asn1.BuildSequence(b, asn1.Sequence|asn1.Constructor, func(b []byte) []byte {
 		b = asn1.BuildObjectID(b, asn1.ObjectID, v.ObjectID)
@@ -523,6 +544,7 @@ func (v *Var) EncodeTo(b []byte) []byte {
 	})
 }
 
+// Decode decodes Variable from the buffer
 func (v *Var) Decode(b []byte) ([]byte, error) {
 	return asn1.ParseSequence(b, func(_ asn1.Type, b []byte) error {
 		b, _, obj := asn1.ParseObjectID(b)
@@ -578,6 +600,7 @@ func (p *PDU) String() string {
 	return b.String()
 }
 
+// Dump returns Protocol Data Unit header info and all Variables
 func (p *PDU) Dump() string {
 	var b strings.Builder
 	b.WriteString(p.String())
@@ -608,7 +631,7 @@ func (v Version) String() string {
 	case Version1:
 		return "1"
 	case Version2c:
-		return "2c"
+		return "2c" //nolint:goconst
 	case Version3:
 		return "3"
 	default:
@@ -616,6 +639,7 @@ func (v Version) String() string {
 	}
 }
 
+// TypeString formats Type as a string
 func TypeString(t Type) string {
 	if t&0xc0 == 0 {
 		return t.String()
@@ -641,6 +665,7 @@ func TypeString(t Type) string {
 	return fmt.Sprintf("Type[%x]", int(t))
 }
 
+// CommandString formats Command as a string
 func CommandString(t Command) string {
 	v, ok := map[asn1.Type]string{
 		Get:      "Get",
