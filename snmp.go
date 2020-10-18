@@ -434,6 +434,28 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+func Dumper(conn net.PacketConn) error {
+	buf := make([]byte, 0x10000)
+
+	for {
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			log.Printf("read: %v", err)
+			continue
+		}
+
+		p := new(PDU)
+		err = p.Decode(buf[:n])
+		if err != nil {
+			log.Printf("decode: %v", err)
+		}
+
+		log.Printf("pdu from %v:\n%v", addr, p.Dump())
+	}
+
+	return nil
+}
+
 // EncodeTo encodes Protocol Data Unit to buffer.
 // If buffer is nil or not big enough new buffer is allocated.
 func (p *PDU) EncodeTo(b []byte) []byte {

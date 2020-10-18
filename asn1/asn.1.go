@@ -3,7 +3,6 @@ package asn1
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -173,7 +172,7 @@ func BuildObjectID(b []byte, tp Type, id OID) []byte {
 		panic(id[0])
 	case len(id) == 1:
 		return append(b, byte(id[0]*40))
-	case id[1] > 40:
+	case id[1] >= 40:
 		panic(id[1])
 	default:
 		b = append(b, byte(id[0]*40+id[1]))
@@ -217,9 +216,6 @@ func ParseLength(b []byte) ([]byte, int) {
 	}
 	if b[0] < 0x80 {
 		return b[1:], int(b[0])
-	}
-	if b[0]&LongLen != LongLen {
-		return nil, int(b[0])
 	}
 	n := int(b[0] & 0xf)
 	l := 0
@@ -292,8 +288,7 @@ func ParseInt(b []byte) ([]byte, Type, int) {
 // It returns (rest of buffer, type, int value).
 func ParseString(b []byte) ([]byte, Type, string) {
 	tp := Type(b[0])
-	var l int
-	b, l = ParseLength(b[1:])
+	b, l := ParseLength(b[1:])
 	v := string(b[:l])
 	return b[l:], tp, v
 }
@@ -347,18 +342,18 @@ func (o OID) HasPrefix(p OID) bool {
 }
 
 // ParseOID parses Object ID in format 1.3.6.1.2.1
-func ParseOID(s string) OID {
+func ParseOID(s string) (OID, error) {
 	if s == "" {
-		return OID{}
+		return OID{}, nil
 	}
 	ns := strings.Split(s, ".")
 	r := make(OID, len(ns))
 	for i, n := range ns {
 		v, err := strconv.ParseUint(n, 10, 32)
 		if err != nil {
-			log.Fatalf("oid[%d]: %v", i, err)
+			return nil, err
 		}
 		r[i] = int(v)
 	}
-	return r
+	return r, nil
 }

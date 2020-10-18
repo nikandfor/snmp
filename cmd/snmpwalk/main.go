@@ -66,7 +66,10 @@ func main() {
 	}
 
 	for _, arg := range flag.Args() {
-		root := asn1.ParseOID(arg)
+		root, err := asn1.ParseOID(arg)
+		if err != nil {
+			log.Fatalf("bad argument: %v", err)
+		}
 
 		p, err := c.Walk(a, root, t)
 		for _, v := range p.Vars {
